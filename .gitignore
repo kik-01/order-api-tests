@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 本地数据库（每次运行自动重建，不入库）
+*.db
+*.db-wal
+*.db-shm
+
+# 运行日志与报告
+logs/
+reports/
+
+# 编辑器
+.idea/
+.vscode/
+.DS_Store
