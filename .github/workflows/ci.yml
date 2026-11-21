@@ -27,6 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate performance test assets
+        run: |
+          python -m py_compile perf/run_load_test.py
+          python -c "import xml.etree.ElementTree as ET; ET.parse('perf/order_api_load_test.jmx')"
+
       - name: Run tests
         run: pytest -q
 
