@@ -1,0 +1,2 @@
+# MySQL 后端（SHOP_DB=mysql）额外依赖；默认 SQLite 路径不需要它
+pymysql>=1.0

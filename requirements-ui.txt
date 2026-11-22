@@ -1,0 +1,2 @@
+# UI 层用例（pytest -m ui）额外依赖；装完还需 python -m playwright install chromium
+playwright>=1.40
