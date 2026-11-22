@@ -279,7 +279,7 @@ def create_app(db_path: str | None, auto_cancel_seconds: float = 1800) -> Flask:
         conn = get_conn()
         try:
             conn.begin()
-            row = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+            row = conn.locking_read("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
             if row is None:
                 conn.rollback()
                 return err("订单不存在", 404)

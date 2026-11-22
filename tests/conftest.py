@@ -70,6 +70,20 @@ def _running_server(tmp_path: pathlib.Path, auto_cancel_seconds):
         thread.join(timeout=5)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _clean_mysql():
+    """MySQL 测试库是常驻的：开跑前清空三张表，避免上次残留订单污染计数断言。"""
+    if dbi.MODE == "mysql":
+        c = dbi.connect()
+        try:
+            for table in ("stock_log", "orders", "products"):
+                c.execute(f"DELETE FROM {table}")
+            c.commit()
+        finally:
+            c.close()
+    yield
+
+
 @pytest.fixture(scope="session")
 def server(tmp_path_factory):
     with _running_server(tmp_path_factory.mktemp("db"), auto_cancel_seconds=1800) as s:

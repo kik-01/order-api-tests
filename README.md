@@ -135,10 +135,16 @@ python perf/run_load_test.py
 验证 InnoDB 行锁下的同一套业务规则。SQL 主体两种库通用，差异只在 `app/dbi.py` 三处：
 
 1. 建表 DDL（AUTOINCREMENT/TEXT/REAL vs AUTO_INCREMENT/VARCHAR/DOUBLE）；
-2. 事务开启（BEGIN IMMEDIATE 整库写锁 vs START TRANSACTION 行锁）；
-3. 幂等兜底（SQLite 靠库锁无窗口期；MySQL 先查后插有窗口期，撞唯一约束 1062 后回滚回查赢家订单）。
+2. 事务与读锁（BEGIN IMMEDIATE 整库写锁、普通 SELECT 就够 vs START TRANSACTION + 状态机必须 FOR UPDATE 锁定读，否则快照读会放过非法流转）；
+3. 幂等兜底（SQLite 靠库锁无窗口期；MySQL 先查后插有窗口期，撞唯一约束 1062 后回滚回查赢家订单）；
+4. 锁错误判定（SQLite "database is locked" vs MySQL 1205 锁等待超时 / 1213 死锁）。
 
 第 3 点是面试重点：**唯一约束才是幂等的最终兜底**，先查后插只是快路径。
+第 2 点是第二个重点：同一段「先查状态再流转」的代码，在 SQLite 上安全、在 MySQL 上有窗口期——行锁与库锁的本质差异。
+
+**实测记录（2026-11-22，本机 MySQL 8.0 / InnoDB）**：接口层 46 passed + 2 xfailed、UI 层 6 passed，
+与 SQLite 结果一致；并发竞态探针连跑 25 轮无抖动。快照读窗口期未被实际复现，
+按 InnoDB 语义补 FOR UPDATE 是为了不依赖运气。
 
 ```powershell
 $env:SHOP_DB="mysql"; $env:MYSQL_PASSWORD="你的密码"
@@ -202,3 +208,4 @@ python -m pytest                      # 同一套 48 条用例跑在 MySQL 上
 | V1.4 | 新增 JMeter 基础压测、自动运行脚本、HTML 报告和结果摘要 | 补齐最基础的性能测试入口，验证写接口与查询接口在 10 并发下的可用性，并明确单机 SQLite 的容量限制 |
 | V1.5 | 删 `test_framework_retry.py`（4 条框架自测）、简化 `logger.py`（去轮转与打码）、清理 client 死字段；52 → 48 条 | 对照 27 届实习 JD 裁剪：框架 mock 自测属测开岗能力，目标 lane 几乎不问，内化成本高于回报；「仅 GET 重试」规则保留在 client.py |
 | V1.6 | 新增最小下单页 + Playwright UI 层 6 条（UI→API→DB 跨层对账）、CI 独立 ui job；新增 `app/dbi.py` SQLite/MySQL 双后端与 MySQL 幂等唯一约束兜底 | 补 JD 高频的 UI 自动化与 MySQL 两项广度；UI 融入同一被测系统而非另起第三方靶场，避免教程模板形状 |
+| V1.7 | MySQL 实测通过（46+2 / UI 6，与 SQLite 一致，25 轮并发探针无抖动）；状态机改 FOR UPDATE 锁定读堵 InnoDB 快照读窗口期；MySQL 测试库开跑前清空夹具 | 跨后端验证把「支持 MySQL」从代码分支变成实测证据；并发正确性不再依赖探针运气 |

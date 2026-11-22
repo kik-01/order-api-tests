@@ -4,10 +4,11 @@
 设环境变量 SHOP_DB=mysql 切到 MySQL：验证 InnoDB 行锁下的并发与幂等。
 
 SQL 主体两种库通用，占位符 ? 由本层翻译成 MySQL 的 %s。
-真正的差异只有三处，也是面试要讲清的三处：
+真正的差异只有四处，也是面试要讲清的四处：
 1. 建表 DDL（AUTOINCREMENT / TEXT / REAL  vs  AUTO_INCREMENT / VARCHAR / DOUBLE）；
 2. 事务开启（SQLite 的 BEGIN IMMEDIATE 拿整库写锁  vs  MySQL 的 START TRANSACTION 只锁碰到的行）；
-3. 锁错误判定（SQLite 的 "database is locked"  vs  MySQL 的 1205 锁等待超时 / 1213 死锁）。
+3. 状态机读（SQLite 普通 SELECT 就够  vs  MySQL 必须 FOR UPDATE 锁定读，否则快照读放过非法流转）；
+4. 锁错误判定（SQLite 的 "database is locked"  vs  MySQL 的 1205 锁等待超时 / 1213 死锁）。
 """
 
 from __future__ import annotations
@@ -126,6 +127,18 @@ class Connection:
         # SQLite：BEGIN IMMEDIATE 立刻拿整库写锁，check-then-insert 无窗口期
         # MySQL：START TRANSACTION，行锁在碰到行时才加，幂等要靠唯一约束兜底
         self.execute("BEGIN IMMEDIATE" if self.mode == "sqlite" else "START TRANSACTION")
+
+    def locking_read(self, sql: str, params: tuple = ()):
+        """状态机「先查状态再流转」必须用锁定读。
+
+        SQLite 的 BEGIN IMMEDIATE 已拿整库写锁，普通 SELECT 就够；
+        MySQL 默认 REPEATABLE READ 的普通 SELECT 是快照读：并发下另一个事务
+        已提交的状态变更看不见，check-then-act 会放过非法流转（支付/取消都成功）。
+        加 FOR UPDATE 读最新已提交版本并锁住该行，把窗口期堵上。
+        """
+        if self.mode == "mysql":
+            return self.execute(sql + " FOR UPDATE", params)
+        return self.execute(sql, params)
 
     def commit(self):
         self.raw.commit()
