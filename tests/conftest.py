@@ -72,8 +72,13 @@ def _running_server(tmp_path: pathlib.Path, auto_cancel_seconds):
 
 @pytest.fixture(scope="session", autouse=True)
 def _clean_mysql():
-    """MySQL 测试库是常驻的：开跑前清空三张表，避免上次残留订单污染计数断言。"""
+    """MySQL 测试库是常驻的：开跑前清空三张表，避免上次残留订单污染计数断言。
+
+    先幂等建表再清：autouse session 夹具早于 server 夹具执行，
+    在全新库（如 CI 的 mysql:8.0 容器）上「先清后建」会撞 1146 表不存在。
+    """
     if dbi.MODE == "mysql":
+        dbi.init_schema()
         c = dbi.connect()
         try:
             for table in ("stock_log", "orders", "products"):
