@@ -172,7 +172,7 @@ python -m pytest                      # 同一套 52 条用例跑在 MySQL 上
 项目一-订单链路测试/
 ├── 00-需求与接口说明.md        # 需求规则 / 接口清单 / 错误码 / 状态机 / Q1–Q3 需求空档
 ├── app/server.py              # 被测服务（Flask，SQLite/MySQL 双后端）
-├── app/dbi.py                 # 数据库连接层：两种库的三处差异在这里
+├── app/dbi.py                 # 数据库连接层：两种库的四处差异在这里
 ├── app/templates/index.html   # 最小下单页（UI 层被测对象）
 ├── common/
 │   ├── client.py              # HTTP 客户端：重试策略在这里
