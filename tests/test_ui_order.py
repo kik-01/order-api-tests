@@ -10,7 +10,14 @@ UI → API → DB 三层对齐，才是「点出来的绿」和「账真的平�
 from __future__ import annotations
 
 import pytest
-from playwright.sync_api import expect
+
+# 接口层 CI（test / mysql-test job）不装 playwright：顶层硬导入会让整个收集阶段
+# 报 ModuleNotFoundError（exit 2）。这里允许缺失：默认 -m "not ui" 会 deselect 本模块；
+# 真跑 -m ui 时 conftest 的 browser fixture 会先因缺 playwright 报错，提示装 requirements-ui.txt。
+try:
+    from playwright.sync_api import expect
+except ModuleNotFoundError:
+    expect = None
 
 pytestmark = pytest.mark.ui
 

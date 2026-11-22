@@ -98,3 +98,13 @@ jobs:
           MYSQL_PASSWORD: testroot
           MYSQL_DATABASE: shop_test
         run: pytest -q
+
+      - name: Run concurrency probe (25 rounds)
+        env:
+          SHOP_DB: mysql
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: testroot
+          MYSQL_DATABASE: shop_test
+        run: python perf/race_probe.py --rounds 25

@@ -133,6 +133,10 @@ python perf/run_load_test.py
 
 运行：`python -m pytest -m ui`（默认 `pytest` 只跑接口层，CI 里 UI 是独立 job）。
 
+依赖说明：`test_ui_order.py` 对 playwright 的顶层导入是容错的（缺失时 `expect=None`）。
+接口层 CI（test / mysql-test job）不装 playwright 也能正常收集用例；
+真跑 `-m ui` 需先装 `requirements-ui.txt`，否则 browser fixture 会在 setup 阶段报缺依赖，而不是收集期崩溃。
+
 ---
 
 ## 八、MySQL 双后端
@@ -152,11 +156,12 @@ python perf/run_load_test.py
 **实测记录（2026-11-22，本机 MySQL 8.0 / InnoDB）**：接口层 50 passed + 2 xfailed、UI 层 6 passed，
 与 SQLite 结果一致；并发竞态探针连跑 25 轮无抖动（`perf/race_probe.py` 可复现，继承当前 env）。
 快照读窗口期未被实际复现，按 InnoDB 语义补 FOR UPDATE 是为了不依赖运气。
-CI 另有独立 `mysql-test` job（mysql:8.0 service 容器），任何人可凭仓库复现同一套用例。
+CI 另有独立 `mysql-test` job（mysql:8.0 service 容器）：先跑同一套用例，再跑
+`python perf/race_probe.py --rounds 25`，任何人可凭仓库复现用例与探针两组结论。
 
 ```powershell
 $env:SHOP_DB="mysql"; $env:MYSQL_PASSWORD="你的密码"
-python -m pytest                      # 同一套 48 条用例跑在 MySQL 上
+python -m pytest                      # 同一套 52 条用例跑在 MySQL 上
 ```
 
 ---
@@ -220,3 +225,4 @@ python -m pytest                      # 同一套 48 条用例跑在 MySQL 上
 | V1.6 | 新增最小下单页 + Playwright UI 层 6 条（UI→API→DB 跨层对账）、CI 独立 ui job；新增 `app/dbi.py` SQLite/MySQL 双后端与 MySQL 幂等唯一约束兜底 | 补 JD 高频的 UI 自动化与 MySQL 两项广度；UI 融入同一被测系统而非另起第三方靶场，避免教程模板形状 |
 | V1.7 | MySQL 实测通过（50+2 / UI 6，与 SQLite 一致，25 轮并发探针无抖动）；状态机改 FOR UPDATE 锁定读堵 InnoDB 快照读窗口期；MySQL 测试库开跑前清空夹具 | 跨后端验证把「支持 MySQL」从代码分支变成实测证据；并发正确性不再依赖探针运气 |
 | V1.8 | 恢复框架自测 4 条（第 4 条改为「非网络错误不重试」，原耗时字段断言随字段删除而移除）；新增 `perf/race_probe.py` 与 CI `mysql-test` job；依赖拆三文件；修正 logger/5xx/UI 覆盖/差异处数四处文档过时 | 外部审查指出：宣传规则的保护用例不该裁、探针数据必须可复现、可选依赖不能混在主清单；逐条采纳 |
+| V1.9 | 修 CI 收集期崩溃：`test_ui_order.py` 顶层硬导入 playwright 改为容错导入（不装 playwright 的 job 收集期 exit 2）；`mysql-test` job 补跑 25 轮探针步骤 | 推送后 CI 实跑暴露：test/mysql job 红、ui job 绿；本机 Python 3.12 干净依赖复现 exit 2 定位根因，修复后双后端 50+2 全绿 |
