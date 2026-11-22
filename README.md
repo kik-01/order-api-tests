@@ -1,7 +1,8 @@
 # 陶瓷商城订单链路 · 接口自动化测试
 
 一个**有状态、有事务、有并发**的订单系统接口测试。
-52 条用例（50 通过 + 2 条标记为已知缺陷），抓出 2 个真实缺陷（1 个数据不一致、1 个对账错误）。
+48 条接口用例（46 通过 + 2 条标记为已知缺陷），抓出 2 个真实缺陷（1 个数据不一致、1 个对账错误）；
+另有 6 条 Playwright UI 层用例（`-m ui` 单独跑），UI 操作后复用接口层对账口径查库。
 另提供一个 JMeter 基础压测场景，用于验证下单与查询接口在 10 并发下是否稳定。
 
 > 被测服务 `app/server.py` 是按真实后端常见结构自行搭建的模拟服务（有库存表、订单表、库存流水表），
@@ -42,7 +43,7 @@ R7 是对账口径：期初记一笔 +stock，之后每次增减都对冲，合�
 
 ---
 
-## 三、用例分布（52 条：50 通过 + 2 条标记为已知缺陷）
+## 三、用例分布（接口层 48 条：46 通过 + 2 条标记为已知缺陷）
 
 | 文件 | 条数 | 测什么 |
 |---|---|---|
@@ -52,10 +53,9 @@ R7 是对账口径：期初记一笔 +stock，之后每次增减都对冲，合�
 | `test_reconcile.py` | 6 | 期初/下单/取消/超时取消后账是否平、取消与退款是否回滚库存 |
 | `test_input_validation.py` | 16 | 入参校验：qty / product_id / price / stock / name 的等价类与边界（两张参数表） |
 | `test_api_contract.py` | 6 | 接口契约：响应字段、商品查询、订单列表与状态过滤、排序 |
-| `test_framework_retry.py` | 4 | 框架自身：「GET 重试、POST 不重试」这条规则的单测 |
 
-后 4 条是**框架自测**：用一个假的 session 把「写操作不重试」钉死。
-这条规则如果只写在注释里，以后谁改成全量重试都没人拦。
+「仅 GET 重试、POST 不重试」这条规则保留在 `common/client.py` 的一个 frozenset 里，
+一句话能讲清：读超时说明请求可能已被处理，写操作重发就是重复下单。
 
 ---
 
@@ -78,7 +78,8 @@ R7 是对账口径：期初记一笔 +stock，之后每次增减都对冲，合�
 
 ```bash
 pip install -r requirements.txt
-python -m pytest                      # 全部：50 passed, 2 xfailed
+python -m pytest                      # 接口层：46 passed, 2 xfailed
+python -m pytest -m ui                # UI 层：6 passed（需 playwright + chromium）
 python -m pytest -m smoke             # 冒烟：5 条核心链路，40 秒内出结果
 python -m pytest -k concurrency       # 只跑并发
 python -m pytest -rx                  # 看 xfail 的原因
@@ -107,16 +108,53 @@ python perf/run_load_test.py
 本次本地结果：2267 次请求成功、0 错误、平均 25.62 ms、P95 61 ms、约 114 requests/s。
 详见 [perf/LOAD_TEST_REPORT.md](perf/LOAD_TEST_REPORT.md)。
 
-> 这是 Flask + SQLite 单机基础压测，不是生产容量测试。更深入的测试需要独立压测机、MySQL、连接池和监控指标。
+> 这是 Flask + SQLite 单机基础压测，不是生产容量测试。更深入的测试需要独立压测机、连接池和监控指标。
 
 ---
 
-## 七、目录
+## 七、UI 层（Playwright）
+
+`app/templates/index.html` 是给被测服务加的最小下单页：只调用既有 API，不含独立业务逻辑。
+`tests/test_ui_order.py` 6 条用例，每条都是 **UI → API → DB 三层对齐**：
+页面断言（订单行、状态、错误提示）之后，用接口层同一套「流水合计 = 当前库存」口径查库。
+
+覆盖：UI 下单对账平、非法数量不留脏数据、超库存提示且库存不动、UI 支付状态一致、
+连点两下提交只成一单（幂等键防重复提交）、取消回滚库存后非法支付被拒。
+
+为什么 UI 用例也要查库：页面显示「下单成功」不代表库里真的扣了库存。
+「点出来的绿」和「账真的平」是两件事。
+
+运行：`python -m pytest -m ui`（默认 `pytest` 只跑接口层，CI 里 UI 是独立 job）。
+
+---
+
+## 八、MySQL 双后端
+
+默认 SQLite：免安装免密码，clone 下来就能跑，CI 零依赖。
+设 `SHOP_DB=mysql` 切到 MySQL（`MYSQL_HOST/PORT/USER/PASSWORD/DATABASE` 可配），
+验证 InnoDB 行锁下的同一套业务规则。SQL 主体两种库通用，差异只在 `app/dbi.py` 三处：
+
+1. 建表 DDL（AUTOINCREMENT/TEXT/REAL vs AUTO_INCREMENT/VARCHAR/DOUBLE）；
+2. 事务开启（BEGIN IMMEDIATE 整库写锁 vs START TRANSACTION 行锁）；
+3. 幂等兜底（SQLite 靠库锁无窗口期；MySQL 先查后插有窗口期，撞唯一约束 1062 后回滚回查赢家订单）。
+
+第 3 点是面试重点：**唯一约束才是幂等的最终兜底**，先查后插只是快路径。
+
+```powershell
+$env:SHOP_DB="mysql"; $env:MYSQL_PASSWORD="你的密码"
+python -m pytest                      # 同一套 48 条用例跑在 MySQL 上
+```
+
+---
+
+## 九、目录
 
 ```
 项目一-订单链路测试/
 ├── 00-需求与接口说明.md        # 需求规则 / 接口清单 / 错误码 / 状态机 / Q1–Q3 需求空档
-├── app/server.py              # 被测服务（Flask + SQLite）
+├── app/server.py              # 被测服务（Flask，SQLite/MySQL 双后端）
+├── app/dbi.py                 # 数据库连接层：两种库的三处差异在这里
+├── app/templates/index.html   # 最小下单页（UI 层被测对象）
 ├── common/
 │   ├── client.py              # HTTP 客户端：重试策略在这里
 │   ├── db.py                  # 直连数据库对账
@@ -130,7 +168,7 @@ python perf/run_load_test.py
 │   ├── test_reconcile.py
 │   ├── test_input_validation.py   # 入参校验：等价类 + 边界（两张参数表）
 │   ├── test_api_contract.py       # 接口契约与查询：字段、列表、过滤、排序
-│   └── test_framework_retry.py
+│   └── test_ui_order.py           # UI 层 6 条（-m ui）：Playwright + 跨层对账
 ├── perf/
 │   ├── order_api_load_test.jmx # JMeter 基础压测场景
 │   ├── run_load_test.py        # 启动服务、执行 JMeter、汇总结果
@@ -144,14 +182,14 @@ python perf/run_load_test.py
 
 ---
 
-## 八、已知限制
+## 十、已知限制
 
-1. **SQLite 不是 MySQL**：并发压到 50 线程时会偶发 `database is locked`，服务端做了 3 次重试。真实项目要换成 MySQL 并测事务隔离级别。
+1. **默认 SQLite 不是生产库**：已提供 MySQL 双后端验证行锁并发，但连接池、主从延迟、事务隔离级别对比仍未覆盖。
 2. **只测了单商品**：多商品下单、购物车拆单没覆盖，属于下一轮范围。
 3. **性能覆盖较浅**：已完成 10 并发的基础压测，但仍是 Flask + SQLite 单机环境，未验证 MySQL 行锁、连接池和生产 SLA。
 4. **超时取消是懒过期**：只在读订单时触发，没有定时任务。真实系统两种都会有，定时任务那条链路没测。
 
-## 九、变更记录
+## 十一、变更记录
 
 个人项目最大的破绽是"一次成型、没有迭代痕迹"。这里如实记：
 
@@ -162,3 +200,5 @@ python perf/run_load_test.py
 | V1.2 | 新增 `03-测试报告.md`（执行统计 / 规则覆盖 / 缺陷分布 / 定位过程 / 环境与数据 / 出口准则） | 复盘发现只有缺陷单、没有整体结论，补上 |
 | V1.3 | 补 24 条用例：入参校验 16（两张等价类参数表）、接口契约与查询 6、支付与取消并发竞态 1、超时取消后禁止支付 1；把 `logger.py` 从旧框架接过来（文件轮转 + 打码）；启用 `-m smoke` 5 条冒烟 | 覆盖率自审发现：全部 28 条里没有一条参数校验用例（400 类为零），商品查询和订单列表两个接口只有"顺带调用"没有独立断言；`pytest.ini` 里定义了 smoke 标记却没用 |
 | V1.4 | 新增 JMeter 基础压测、自动运行脚本、HTML 报告和结果摘要 | 补齐最基础的性能测试入口，验证写接口与查询接口在 10 并发下的可用性，并明确单机 SQLite 的容量限制 |
+| V1.5 | 删 `test_framework_retry.py`（4 条框架自测）、简化 `logger.py`（去轮转与打码）、清理 client 死字段；52 → 48 条 | 对照 27 届实习 JD 裁剪：框架 mock 自测属测开岗能力，目标 lane 几乎不问，内化成本高于回报；「仅 GET 重试」规则保留在 client.py |
+| V1.6 | 新增最小下单页 + Playwright UI 层 6 条（UI→API→DB 跨层对账）、CI 独立 ui job；新增 `app/dbi.py` SQLite/MySQL 双后端与 MySQL 幂等唯一约束兜底 | 补 JD 高频的 UI 自动化与 MySQL 两项广度；UI 融入同一被测系统而非另起第三方靶场，避免教程模板形状 |

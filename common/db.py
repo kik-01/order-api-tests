@@ -1,23 +1,24 @@
 """直连数据库查数，用于「接口说完的事，库里是不是真的发生了」。
 
 接口测试只断言响应体，遇到异步写、事务回滚、主从延迟照样会绿。
-对账必须绕过接口，直接看表。
+对账必须绕过接口，直接看表。连接方式由 app/dbi.py 决定（SQLite / MySQL），
+本文件的 SQL 两种库通用。
 """
 
 from __future__ import annotations
 
-import sqlite3
 from contextlib import contextmanager
+
+from app import dbi
 
 
 class Db:
-    def __init__(self, path: str):
+    def __init__(self, path: str | None):
         self.path = path
 
     @contextmanager
     def conn(self):
-        c = sqlite3.connect(self.path, timeout=15)
-        c.row_factory = sqlite3.Row
+        c = dbi.connect(self.path)
         try:
             yield c
         finally:

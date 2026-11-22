@@ -1,3 +1,7 @@
 flask>=3.0
 pytest>=8.0
 requests>=2.31
+# 以下两项支撑可选路径：MySQL 后端（SHOP_DB=mysql）与 UI 层用例（pytest -m ui）
+# 只跑默认接口层时，不装它们也能跑（SQLite 免依赖）
+pymysql>=1.0
+playwright>=1.40

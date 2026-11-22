@@ -43,7 +43,7 @@ class ApiClient:
         for i in range(attempts):
             started = time.monotonic()
             if "json" in kwargs:
-                # 只在 DEBUG 落请求体，且截断；敏感字段由 logger 的过滤器打码
+                # 只在 DEBUG 落请求体，且截断，避免日志爆炸
                 payload = json.dumps(kwargs["json"], ensure_ascii=False)
                 log.debug("%s %s body=%s", method, url, payload[:500])
             try:
@@ -57,8 +57,6 @@ class ApiClient:
                 raise
 
             cost_ms = (time.monotonic() - started) * 1000
-            resp.elapsed_ms = cost_ms  # 含重试的总耗时，性能断言用这个
-            resp.attempts = i + 1
             log.info("%s %s -> %s (%.0fms)", method, url, resp.status_code, cost_ms)
             return resp
 

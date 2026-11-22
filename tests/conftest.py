@@ -2,6 +2,9 @@
 
 被测服务用 werkzeug 起在子线程里，测试结束 shutdown。
 不用 Flask 自带 app.run()：它没有优雅退出的入口，跑完 pytest 会挂住。
+
+数据库默认 SQLite（临时文件）；设 SHOP_DB=mysql 时改用 MySQL 测试库，
+用例与对账 SQL 不变，验证的是 InnoDB 行锁下的同一套业务规则。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from werkzeug.serving import make_server
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app import dbi  # noqa: E402
 from app.server import create_app  # noqa: E402
 from common.client import ApiClient  # noqa: E402
 from common.db import Db  # noqa: E402
@@ -41,7 +45,7 @@ def _free_port() -> int:
 
 @contextmanager
 def _running_server(tmp_path: pathlib.Path, auto_cancel_seconds):
-    db_path = str(tmp_path / "shop.db")
+    db_path = None if dbi.MODE == "mysql" else str(tmp_path / "shop.db")
     app = create_app(db_path, auto_cancel_seconds=auto_cancel_seconds)
     port = _free_port()
     server = make_server("127.0.0.1", port, app, threaded=True)
@@ -111,3 +115,24 @@ def db(env):
 @pytest.fixture
 def factory(env):
     return env[2]
+
+
+# ---------- UI 层夹具（pytest -m ui 才会用到） ----------
+
+@pytest.fixture(scope="session")
+def browser():
+    from playwright.sync_api import sync_playwright
+
+    pw = sync_playwright().start()
+    b = pw.chromium.launch(headless=True)
+    yield b
+    b.close()
+    pw.stop()
+
+
+@pytest.fixture
+def page(browser):
+    ctx = browser.new_context()
+    pg = ctx.new_page()
+    yield pg
+    ctx.close()

@@ -5,48 +5,20 @@
 这个服务有状态、有事务、有并发，真实系统会出问题的地方，这里也会出。
 
 业务规则由项目内需求说明定义，测试用例从规则推导。
+数据库默认 SQLite（免安装可复现），设 SHOP_DB=mysql 切 MySQL 验证行锁并发，见 app/dbi.py。
 
-启动：python -m app.server          # 默认 127.0.0.1:8000
+启动：python -m app.server          # 默认 127.0.0.1:8000，浏览器打开 / 有最小下单页
 """
 
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
 import uuid
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, render_template, request
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS products (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL,
-    price_cents INTEGER NOT NULL,
-    stock       INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS orders (
-    id              TEXT PRIMARY KEY,
-    product_id      INTEGER NOT NULL,
-    qty             INTEGER NOT NULL,
-    amount_cents    INTEGER NOT NULL,
-    status          TEXT    NOT NULL,
-    idempotency_key TEXT    UNIQUE,
-    created_at      REAL    NOT NULL,
-    updated_at      REAL    NOT NULL
-);
-
--- 库存流水：每一次库存变动都要留痕，否则对账时无法解释差额
-CREATE TABLE IF NOT EXISTS stock_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id INTEGER NOT NULL,
-    delta      INTEGER NOT NULL,
-    reason     TEXT    NOT NULL,
-    order_id   TEXT,
-    created_at REAL    NOT NULL
-);
-"""
+from app import dbi
 
 # 状态机：当前状态 -> 允许流转到的状态
 # pending  -> paid | cancelled
@@ -63,34 +35,26 @@ STATE_MACHINE = {
 }
 
 
-def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
-    """建应用。db_path 由调用方给，测试用临时文件，互不干扰。"""
+def create_app(db_path: str | None, auto_cancel_seconds: float = 1800) -> Flask:
+    """建应用。SQLite 时 db_path 由调用方给（测试用临时文件）；MySQL 时忽略 db_path。"""
     app = Flask(__name__)
     app.config["DB_PATH"] = db_path
     app.config["AUTO_CANCEL_SECONDS"] = auto_cancel_seconds
 
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript(SCHEMA)
-        conn.execute("PRAGMA journal_mode=WAL")
+    dbi.init_schema(db_path)
 
     # ---------- 基础工具 ----------
 
-    def get_conn() -> sqlite3.Connection:
-        # 每个请求独立连接：SQLite 连接不能跨线程复用
-        conn = sqlite3.connect(
-            app.config["DB_PATH"], timeout=15, isolation_level=None
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=15000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    def get_conn() -> dbi.Connection:
+        # 每个请求独立连接：SQLite 连接不能跨线程复用，MySQL 连接 likewise 不共享
+        return dbi.connect(app.config["DB_PATH"])
 
     def err(msg: str, code: int, **extra):
         body = {"code": code, "message": msg}
         body.update(extra)
         return jsonify(body), code
 
-    def order_to_dict(row: sqlite3.Row) -> dict:
+    def order_to_dict(row) -> dict:
         return {
             "id": row["id"],
             "product_id": row["product_id"],
@@ -99,6 +63,12 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
             "status": row["status"],
             "created_at": row["created_at"],
         }
+
+    # ---------- 页面（UI 层测试的被测对象） ----------
+
+    @app.get("/")
+    def index():
+        return render_template("index.html")
 
     # ---------- 商品 ----------
 
@@ -132,6 +102,15 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
 
         return jsonify({"id": pid, "name": name, "price_cents": price, "stock": stock}), 201
 
+    @app.get("/api/products")
+    def list_products():
+        conn = get_conn()
+        try:
+            rows = conn.execute("SELECT * FROM products ORDER BY id").fetchall()
+        finally:
+            conn.close()
+        return jsonify([dict(r) for r in rows])
+
     @app.get("/api/products/<int:pid>")
     def get_product(pid: int):
         conn = get_conn()
@@ -146,18 +125,15 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
     # ---------- 下单 ----------
 
     def _retry_on_lock(fn, attempts: int = 3):
-        """SQLite 是单写锁，并发写会短时 locked；所有写操作都要走这里。
-
-        只重试 "locked"，其他 OperationalError（比如语法错）直接抛——
-        不加区分的重试会把真 bug 藏起来。
-        """
+        """并发写会短时撞锁；只重试锁竞争，其他错误直接抛——
+        不加区分的重试会把真 bug 藏起来。SQLite 撞整库写锁，MySQL 撞行锁等待。"""
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
                 return fn()
-            except sqlite3.OperationalError as exc:
+            except dbi.DBError as exc:
                 last_exc = exc
-                if "locked" in str(exc) and attempt < attempts - 1:
+                if dbi.is_lock_error(exc) and attempt < attempts - 1:
                     time.sleep(0.1 * (attempt + 1))
                     continue
                 raise
@@ -175,12 +151,12 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
         if qty <= 0:
             return err("购买数量必须大于 0", 400)
 
-        return _retry_on_lock(lambda: _create_order_once(pid, qty, key, request))
+        return _retry_on_lock(lambda: _create_order_once(pid, qty, key))
 
-    def _create_order_once(pid: int, qty: int, key: str | None, req):
+    def _create_order_once(pid: int, qty: int, key: str | None):
         conn = get_conn()
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin()
 
             # 幂等：同一个 key 只产生一张订单，重复提交返回已有订单
             if key:
@@ -188,14 +164,14 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
                     "SELECT * FROM orders WHERE idempotency_key=?", (key,)
                 ).fetchone()
                 if exist is not None:
-                    conn.execute("COMMIT")
+                    conn.commit()
                     return jsonify(order_to_dict(exist)), 200
 
             prod = conn.execute(
                 "SELECT * FROM products WHERE id=?", (pid,)
             ).fetchone()
             if prod is None:
-                conn.execute("ROLLBACK")
+                conn.rollback()
                 return err("商品不存在", 404)
 
             # 关键：扣减与「库存是否足够」在同一条 SQL 里完成，
@@ -205,30 +181,42 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
                 (qty, pid, qty),
             )
             if cur.rowcount == 0:
-                conn.execute("ROLLBACK")
+                conn.rollback()
                 return err("库存不足", 409, stock=prod["stock"], requested=qty)
 
             oid = uuid.uuid4().hex[:12]
             now = time.time()
-            conn.execute(
-                "INSERT INTO orders(id, product_id, qty, amount_cents, status,"
-                " idempotency_key, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (oid, pid, qty, prod["price_cents"] * qty, "pending", key, now, now),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO orders(id, product_id, qty, amount_cents, status,"
+                    " idempotency_key, created_at, updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    (oid, pid, qty, prod["price_cents"] * qty, "pending", key, now, now),
+                )
+            except dbi.DBError as exc:
+                # MySQL 行锁下「先查后插」有窗口期：并发同键会撞唯一约束。
+                # 撞了就回滚、回查赢家的订单返回 200 —— 唯一约束才是幂等的最终兜底。
+                if key and dbi.is_unique_violation(exc):
+                    conn.rollback()
+                    exist = conn.execute(
+                        "SELECT * FROM orders WHERE idempotency_key=?", (key,)
+                    ).fetchone()
+                    if exist is not None:
+                        return jsonify(order_to_dict(exist)), 200
+                raise
             conn.execute(
                 "INSERT INTO stock_log(product_id, delta, reason, order_id, created_at)"
                 " VALUES(?,?,?,?,?)",
                 (pid, -qty, "order_create", oid, now),
             )
-            conn.execute("COMMIT")
+            conn.commit()
 
             row = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
             return jsonify(order_to_dict(row)), 201
         except Exception:
             try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
+                conn.rollback()
+            except dbi.DBError:
                 pass
             raise
         finally:
@@ -290,15 +278,15 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
     def _transit_once(oid: str, target: str, on_success=None):
         conn = get_conn()
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin()
             row = conn.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
             if row is None:
-                conn.execute("ROLLBACK")
+                conn.rollback()
                 return err("订单不存在", 404)
 
             allowed = STATE_MACHINE.get(row["status"], set())
             if target not in allowed:
-                conn.execute("ROLLBACK")
+                conn.rollback()
                 return err(
                     f"订单当前状态 {row['status']} 不允许变更为 {target}",
                     409,
@@ -312,25 +300,25 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
             if on_success is not None:
                 on_success(conn, row)
 
-            conn.execute("COMMIT")
+            conn.commit()
             new_row = conn.execute(
                 "SELECT * FROM orders WHERE id=?", (oid,)
             ).fetchone()
             return jsonify(order_to_dict(new_row)), 200
         except Exception:
             try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
+                conn.rollback()
+            except dbi.DBError:
                 pass
             raise
         finally:
             conn.close()
 
     def transit(oid: str, target: str, on_success=None):
-        """状态流转也要重试：并发下 begin immediate 会等锁。
+        """状态流转也要重试：并发下会等锁。
 
         没有这层包装时，"支付"和"取消"同时到达，输了锁的那个直接 500，
-        看起来像业务缺陷，其实是 SQLite 单写锁的环境问题。
+        看起来像业务缺陷，其实是数据库锁竞争的环境问题。
         """
         return _retry_on_lock(lambda: _transit_once(oid, target, on_success))
 
@@ -373,7 +361,7 @@ def create_app(db_path: str, auto_cancel_seconds: float = 1800) -> Flask:
 
 
 def main() -> None:
-    db_path = os.environ.get("SHOP_DB", os.path.join(os.path.dirname(__file__), "shop.db"))
+    db_path = os.environ.get("SHOP_DB_PATH", os.path.join(os.path.dirname(__file__), "shop.db"))
     app = create_app(db_path)
     app.run(host="127.0.0.1", port=8000, threaded=True, debug=False)
 
