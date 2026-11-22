@@ -116,7 +116,10 @@ jobs:
           MYSQL_USER: root
           MYSQL_PASSWORD: testroot
           MYSQL_DATABASE: shop_test
-        run: pytest -q --tb=line -rfE
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q --tb=line -rfE 2>&1 | tee mysql_ci.log
 
       - name: Run concurrency probe (25 rounds)
         env:
@@ -126,4 +129,20 @@ jobs:
           MYSQL_USER: root
           MYSQL_PASSWORD: testroot
           MYSQL_DATABASE: shop_test
-        run: python perf/race_probe.py --rounds 25
+        shell: bash
+        run: |
+          set -o pipefail
+          python perf/race_probe.py --rounds 25 2>&1 | tee probe_ci.log
+
+      - name: Publish MySQL result to run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## MySQL CI result'
+            echo '```'
+            tail -n 40 mysql_ci.log 2>/dev/null || echo '(no test log)'
+            echo '--- probe ---'
+            tail -n 12 probe_ci.log 2>/dev/null || echo '(no probe log)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
